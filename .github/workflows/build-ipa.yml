@@ -1,0 +1,60 @@
+name: Build IPA (Direct Release)
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: macos-15
+    permissions:
+      contents: write 
+
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+
+      - name: 准备编译环境
+        run: |
+          xcodebuild -version
+
+      - name: 解压工程
+        run: |
+          # 仅解压，绝不删除或修改你的任何工程文件与图片资源
+          find . -maxdepth 2 -iname "*.zip" -exec unzip -o -q "{}" \;
+
+      - name: 原汁原味编译并打包 IPA
+        run: |
+          # 找到你的工程根目录
+          PKG_DIR=$(find . -name "Package.swift" -not -path "*/.*" -exec dirname {} \; | head -n 1)
+          cd "$PKG_DIR"
+          echo "编译源码目录: $PWD"
+
+          SCHEME=$(xcodebuild -list 2>/dev/null | awk '/Schemes:/{flag=1;next} flag && NF{print $1; exit}')
+          if [ -z "$SCHEME" ]; then SCHEME="AppModule"; fi
+          echo "编译 Scheme: $SCHEME"
+
+          # 原生归档构建，由 Xcode 官方完整打包所有资源、字体、图标，不漏任何东西
+          xcodebuild archive \
+            -scheme "$SCHEME" \
+            -destination "generic/platform=iOS" \
+            -archivePath "./build/App.xcarchive" \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY=""
+
+          # 提取 Xcode 官方打包好的完整 .app
+          mkdir -p "$GITHUB_WORKSPACE/Payload"
+          cp -R ./build/App.xcarchive/Products/Applications/*.app "$GITHUB_WORKSPACE/Payload/"
+
+          cd "$GITHUB_WORKSPACE"
+          # 打包成 IPA
+          zip -qry YouDao.ipa Payload
+          echo "🎉 100% 原始项目打包完成！"
+
+      - name: 发布 Release 并提供 IPA 下载
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: "v1.0.${{ github.run_number }}"
+          name: "幼刀 直装版 IPA (Build ${{ github.run_number }})"
+          files: YouDao.ipa
+          token: ${{ secrets.GITHUB_TOKEN }}
