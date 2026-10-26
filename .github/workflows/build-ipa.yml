@@ -13,43 +13,88 @@ jobs:
       - name: 检出代码
         uses: actions/checkout@v4
 
-      - name: 准备编译环境
+      - name: 确认 Xcode 16 环境
         run: |
           xcodebuild -version
 
       - name: 解压工程
         run: |
-          # 仅解压，绝不删除或修改你的任何工程文件与图片资源
           find . -maxdepth 2 -iname "*.zip" -exec unzip -o -q "{}" \;
 
-      - name: 原汁原味编译并打包 IPA
+      - name: 原版编译并打包 IPA
         run: |
-          # 找到你的工程根目录
+          # 1. 定位工程目录
           PKG_DIR=$(find . -name "Package.swift" -not -path "*/.*" -exec dirname {} \; | head -n 1)
           cd "$PKG_DIR"
-          echo "编译源码目录: $PWD"
+          echo "工程目录: $PWD"
 
           SCHEME=$(xcodebuild -list 2>/dev/null | awk '/Schemes:/{flag=1;next} flag && NF{print $1; exit}')
           if [ -z "$SCHEME" ]; then SCHEME="AppModule"; fi
           echo "编译 Scheme: $SCHEME"
 
-          # 原生归档构建，由 Xcode 官方完整打包所有资源、字体、图标，不漏任何东西
-          xcodebuild archive \
+          # 2. 编译并把真实错误捕获到日志中
+          set +e
+          xcodebuild build \
             -scheme "$SCHEME" \
             -destination "generic/platform=iOS" \
-            -archivePath "./build/App.xcarchive" \
+            -configuration Release \
+            -derivedDataPath ./build \
             CODE_SIGNING_ALLOWED=NO \
             CODE_SIGNING_REQUIRED=NO \
-            CODE_SIGN_IDENTITY=""
+            CODE_SIGN_IDENTITY="" > build.log 2>&1
+          
+          BUILD_STATUS=$?
+          if [ $BUILD_STATUS -ne 0 ]; then
+            echo "==================== [ 真实报错代码与行号定位 ] ===================="
+            grep -E "error:" build.log | grep -v "ResultBundle" | head -n 30
+            echo "==================================================================="
+            exit $BUILD_STATUS
+          fi
+          set -e
 
-          # 提取 Xcode 官方打包好的完整 .app
-          mkdir -p "$GITHUB_WORKSPACE/Payload"
-          cp -R ./build/App.xcarchive/Products/Applications/*.app "$GITHUB_WORKSPACE/Payload/"
+          # 3. 编译通过后，定位最终成品目录
+          PRODUCTS_DIR=$(find ./build -type d -path "*/Build/Products/Release-iphoneos" | head -n 1)
+          if [ -z "$PRODUCTS_DIR" ]; then
+            PRODUCTS_DIR="./build/Build/Products/Release-iphoneos"
+          fi
+          echo "✅ 产物目录: $PRODUCTS_DIR"
 
+          # 4. 创建标准 iOS .app 结构
+          mkdir -p "$GITHUB_WORKSPACE/Payload/YouDao.app"
+
+          # (1) 复制主程序
+          APP_BIN=$(find "$PRODUCTS_DIR" -maxdepth 1 -type f ! -name "*.*" ! -name ".*" | head -n 1)
+          if [ -z "$APP_BIN" ]; then APP_BIN="$PRODUCTS_DIR/幼刀"; fi
+          cp "$APP_BIN" "$GITHUB_WORKSPACE/Payload/YouDao.app/YouDao"
+          chmod +x "$GITHUB_WORKSPACE/Payload/YouDao.app/YouDao"
+
+          # (2) 完整合并资源包 (图片/字体/Bundle)
+          find "$PRODUCTS_DIR" -maxdepth 1 -type d -name "*.bundle" | while read -r bndl; do
+            cp -R "$bndl/"* "$GITHUB_WORKSPACE/Payload/YouDao.app/" 2>/dev/null || true
+          done
+
+          # (3) 动态库（安全防空）
+          if [ -d "$PRODUCTS_DIR/PackageFrameworks" ] && [ "$(ls -A "$PRODUCTS_DIR/PackageFrameworks" 2>/dev/null)" ]; then
+            mkdir -p "$GITHUB_WORKSPACE/Payload/YouDao.app/Frameworks"
+            cp -R "$PRODUCTS_DIR/PackageFrameworks/"* "$GITHUB_WORKSPACE/Payload/YouDao.app/Frameworks/" 2>/dev/null || true
+          fi
+
+          # 5. 写入运行必备基础元信息
+          PLIST_PATH="$GITHUB_WORKSPACE/Payload/YouDao.app/Info.plist"
+          if [ ! -f "$PLIST_PATH" ]; then
+            plutil -create xml1 "$PLIST_PATH"
+          fi
+          plutil -replace CFBundlePackageType -string "APPL" "$PLIST_PATH" || true
+          plutil -replace CFBundleExecutable -string "YouDao" "$PLIST_PATH" || true
+          plutil -replace CFBundleIdentifier -string "com.youdong.app" "$PLIST_PATH" || true
+          plutil -replace CFBundleName -string "幼刀" "$PLIST_PATH" || true
+          plutil -replace CFBundleDisplayName -string "幼刀" "$PLIST_PATH" || true
+          plutil -replace MinimumOSVersion -string "17.0" "$PLIST_PATH" || true
+
+          # 6. 生成 IPA
           cd "$GITHUB_WORKSPACE"
-          # 打包成 IPA
           zip -qry YouDao.ipa Payload
-          echo "🎉 100% 原始项目打包完成！"
+          echo "🎉 原版项目 YouDao.ipa 打包成功！"
 
       - name: 发布 Release 并提供 IPA 下载
         uses: softprops/action-gh-release@v2
